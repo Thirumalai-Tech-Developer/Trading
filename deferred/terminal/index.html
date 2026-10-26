@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111724">
+  <title>GuruTrade 7 · Trading terminal</title>
+  <meta name="description" content="Independent local reconstruction of the GuruTrade 7 trading experience. Practice with simulated quotes and virtual funds.">
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="GuruTrade 7 home"><span class="brand-mark">g<span>7</span></span><span>GuruTrade<span class="brand-seven">7</span><small>Web terminal</small></span></a>
+    <div class="session-status"><span class="status-dot"></span>Practice workspace <span class="subtle">/</span> <span class="subtle">Simulated market</span></div>
+    <div class="header-actions"><button id="notifications-button" class="icon-button" aria-label="Notifications"></button><button id="account-button" class="balance-button"><span class="status-dot"></span><span><small>Demo account</small><strong id="balance">—</strong></span><span class="chevron">⌄</span></button><button class="button primary" id="deposit-button">+ Add funds</button><button id="login-button" class="button">Log in</button><button id="avatar-button" class="avatar hidden" aria-label="Profile">G</button></div>
+  </header>
+  <div class="workspace">
+    <nav class="sidebar" aria-label="Main navigation">
+      <div id="navigation"></div>
+      <div class="nav-bottom"><button data-page="help" class="nav-item"><span data-icon="help"></span><span>Help</span></button><button id="theme-button" class="nav-item"><span data-icon="sun"></span><span>Theme</span></button><span class="version">Local edition<br>v1.0</span></div>
+    </nav>
+    <main id="main">
+      <section id="terminal" class="page terminal-page">
+        <aside class="watchlist">
+          <div class="section-heading"><h2>Markets</h2><span class="count" id="market-count">8</span></div>
+          <label class="search-field"><span data-icon="search"></span><input id="market-search" type="search" placeholder="Search assets" aria-label="Search assets"></label>
+          <div class="market-filters" id="market-filters"><button data-filter="all" class="active">All</button><button data-filter="favorites" aria-label="Favorite assets">☆</button><button data-filter="forex">Forex</button><button data-filter="crypto">Crypto</button></div>
+          <div class="watchlist-caption"><span>Asset</span><span>Return</span></div>
+          <div id="markets" class="markets"></div>
+          <div class="watchlist-footer"><span class="status-dot"></span>OTC simulation available 24/7<small>Quotes are generated locally.</small></div>
+        </aside>
+        <section class="trading-center">
+          <div class="asset-tabs" id="asset-tabs"></div>
+          <div class="chart-heading"><div class="asset-heading"><span id="selected-coin" class="asset-coin">€</span><div><h1 id="asset-name">EUR/USD <span>OTC</span></h1><p id="asset-subtitle">Euro / US Dollar</p></div></div><div class="quote-heading"><strong id="last-price">—</strong><span id="price-change" class="positive">—</span></div></div>
+          <div class="chart-toolbar"><label class="select-label"><select id="chart-type" aria-label="Chart style"><option value="candles">Candles</option><option value="bars">Bars</option><option value="heikin">Heikin-Ashi</option><option value="line">Line</option><option value="area">Area</option></select></label><div class="toolbar-divider"></div><label class="select-label"><span data-icon="indicator"></span><select id="indicator" aria-label="Chart indicator"><option value="none">Indicators</option><option value="sma">MA · 5 / 10 / 20</option><option value="ema">EMA · 20</option><option value="bollinger">Bollinger bands</option><option value="rsi">RSI · 14</option><option value="macd">MACD · 12 / 26 / 9</option><option value="kdj">KDJ · 9 / 3 / 3</option></select></label><button id="chart-reset" class="icon-button" title="Reset chart zoom" aria-label="Reset chart zoom"><span data-icon="expand"></span></button><span class="chart-live"><span class="status-dot"></span>Simulation</span></div>
+          <div class="chart-wrap"><canvas id="chart" tabindex="0" role="img" aria-label="Simulated EUR/USD price chart. Use plus and minus keys to zoom."></canvas><div class="chart-watermark">GuruTrade<span>7</span><small>Practice with perspective.</small></div><div id="chart-tooltip" class="chart-tooltip hidden"></div><div id="chart-loading" class="chart-loading">Loading chart…</div></div>
+          <div class="chart-footer"><div id="timeframes" class="timeframes"><button data-interval="5" class="active">5s</button><button data-interval="15">15s</button><button data-interval="60">1m</button><button data-interval="180">3m</button><button data-interval="300">5m</button><button data-interval="900">15m</button><button data-interval="1800">30m</button><button data-interval="3600">1h</button></div><span id="server-clock">— UTC</span><button id="chart-zoom-out" class="icon-button" aria-label="Zoom out">−</button><button id="chart-zoom-in" class="icon-button" aria-label="Zoom in">+</button></div>
+          <section class="positions"><div class="positions-header"><div class="position-tabs"><button id="open-trades-tab" class="active">Open trades <span id="open-count">0</span></button><button id="recent-trades-tab">Recent history</button></div><button id="all-history-button" class="text-button">View all history <span>↗</span></button></div><div id="positions-content"></div></section>
+        </section>
+        <aside class="trade-ticket"><div class="section-heading"><h2>Place a trade</h2><span class="tiny-tag">Demo</span></div><div class="segmented trade-mode" id="trade-mode"><button data-mode="flash" class="active">ϟ Flash</button><button data-mode="standard">Standard</button></div><label class="field-label" for="duration">Duration <span data-icon="clock"></span></label><div class="ticket-field"><select id="duration"><option value="5">00:00:05</option><option value="15">00:00:15</option><option value="30">00:00:30</option><option value="60" selected>00:01:00</option><option value="120">00:02:00</option><option value="300">00:05:00</option></select></div><label class="field-label" for="amount">Trade amount <span>USD</span></label><div class="ticket-field amount-field"><span>$</span><input id="amount" type="number" min="1" max="100000" step="0.01" value="10" inputmode="decimal"><div><button id="amount-minus" aria-label="Decrease amount">−</button><button id="amount-plus" aria-label="Increase amount">+</button></div></div><div class="amount-presets" id="amount-presets"><button data-amount="10">$10</button><button data-amount="50">$50</button><button data-amount="100">$100</button><button data-amount="500">$500</button></div><div class="payout-box"><span>Potential profit <span class="info" title="Profit if the prediction wins. Your stake is also returned. A losing prediction loses the stake.">i</span></span><strong id="expected-profit">+$8.00</strong><div><span>Return on stake</span><span id="payout">80%</span></div></div><p class="prediction-label">Where will the price go?</p><button id="trade-up" class="trade-button up"><span data-icon="trend-up"></span>Higher<span>↑</span></button><button id="trade-down" class="trade-button down"><span data-icon="trend-down"></span>Lower<span>↓</span></button><p id="trade-feedback" class="trade-feedback" role="status"></p><div class="ticket-note"><span data-icon="shield"></span><p>Virtual funds. Real practice.<small>No real money is used in this workspace.</small></p></div><div class="market-summary"><h3>Session overview</h3><div><span>Trades today</span><strong id="stat-trades">0</strong></div><div><span>Win rate</span><strong id="stat-winrate">—</strong></div><div><span>Net profit</span><strong id="stat-profit">$0.00</strong></div></div></aside>
+      </section>
+      <section id="secondary" class="page secondary-page hidden"></section>
+    </main>
+  </div>
+  <footer class="statusbar"><span><span class="status-dot"></span><span id="connection-state">Connecting</span></span><span>Independent reconstruction · Virtual funds & simulated quotes</span><span id="footer-time">—</span></footer>
+  <dialog id="modal"><button id="modal-close" class="modal-close icon-button" aria-label="Close dialog">×</button><div id="modal-content"></div></dialog>
+  <div id="toast" class="toast hidden" role="status"></div>
+</body>
+</html>

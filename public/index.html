@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111724">
+  <title>GuruTrade 7 · Trading terminal</title>
+  <meta name="description" content="Trading terminal with GuruTrade market data and broker account access.">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/terminal-extra.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="GuruTrade 7 home"><span class="brand-mark">g<span>7</span></span><span>GuruTrade<span class="brand-seven">7</span><small>Web terminal</small></span></a>
+    <div class="session-status"><span class="status-dot"></span>Trading workspace <span class="subtle">/</span> <span class="subtle" id="header-source">GuruTrade backend</span></div>
+    <div class="header-actions"><button id="broker-login-button" class="button">Connect GuruTrade</button><button id="notifications-button" class="icon-button" aria-label="Order journal"></button><button id="account-button" class="balance-button"><span class="status-dot"></span><span><small id="account-label">Demo account</small><strong id="balance">—</strong></span><span class="chevron">⌄</span></button></div>
+  </header>
+  <div class="workspace">
+    <nav class="sidebar" aria-label="Main navigation">
+      <div id="navigation"></div>
+      <div class="nav-bottom"><button data-page="help" class="nav-item"><span data-icon="help"></span><span>Help</span></button><button id="theme-button" class="nav-item"><span data-icon="sun"></span><span>Theme</span></button><span class="version">Local edition<br>v1.0</span></div>
+    </nav>
+    <main id="main">
+      <section id="terminal" class="page terminal-page">
+        <aside class="watchlist">
+          <div class="section-heading"><h2>Markets</h2><span class="count" id="market-count">0</span></div>
+          <label class="search-field"><span data-icon="search"></span><input id="market-search" type="search" placeholder="Search assets" aria-label="Search assets"></label>
+          <div class="market-filters" id="market-filters"><button data-filter="all" class="active">All</button><button data-filter="favorites" aria-label="Favorite assets">☆</button><button data-filter="forex">Forex</button><button data-filter="stocks">Stocks</button><button data-filter="indices">Indices</button><button data-filter="crypto">Crypto</button><button data-filter="commodities">Commodities</button></div>
+          <div class="watchlist-caption"><span>Asset</span><span>Return</span></div>
+          <div id="markets" class="markets"></div>
+          <div class="watchlist-footer" id="watchlist-source">Market catalogue from GuruTrade.<small>Prices are shown only when verified.</small></div>
+        </aside>
+        <section class="trading-center">
+          <div class="asset-tabs" id="asset-tabs"></div>
+          <div class="chart-heading"><div class="asset-heading"><span id="selected-coin" class="asset-coin">€</span><div><h1 id="asset-name">EUR/USD <span>OTC</span></h1><p id="asset-subtitle">Euro / US Dollar</p></div></div><div class="quote-heading"><strong id="last-price">—</strong><span id="price-change" class="positive">—</span></div></div>
+          <div class="chart-toolbar"><label class="select-label"><select id="source-select" aria-label="Account type"><option value="demo">Demo account</option><option value="real">Real account</option></select></label><div class="toolbar-divider"></div><label class="select-label"><select id="chart-type" aria-label="Chart style"><option value="candles">Candles</option><option value="bars">Bars</option><option value="line">Line</option><option value="area">Area</option></select></label><button id="chart-reset" class="icon-button" title="Reset chart zoom" aria-label="Reset chart zoom"><span data-icon="expand"></span></button><span class="chart-live" id="chart-source"><span class="status-dot"></span>Backend</span></div>
+          <p id="history-range" class="history-range" role="status">Last 1h · loading available broker samples…</p><div class="chart-wrap"><canvas id="chart" tabindex="0" role="img" aria-label="Market price chart. Use plus and minus keys to zoom."></canvas><div class="chart-watermark">GuruTrade<span>7</span><small id="chart-caption">Market workspace</small></div><div id="chart-tooltip" class="chart-tooltip hidden"></div><div id="chart-loading" class="chart-loading">Connecting to backend…</div></div>
+          <div class="chart-footer"><div id="timeframes" class="timeframes"><button data-interval="5">5s</button><button data-interval="10">10s</button><button data-interval="15">15s</button><button data-interval="60" class="active">1m</button><button data-interval="180">3m</button><button data-interval="300">5m</button><button data-interval="900">15m</button><button data-interval="1800">30m</button><button data-interval="3600">1h</button></div><span id="server-clock">— UTC</span><button id="chart-zoom-out" class="icon-button" aria-label="Zoom out">−</button><button id="chart-zoom-in" class="icon-button" aria-label="Zoom in">+</button></div>
+          <section class="positions"><div class="positions-header"><div class="position-tabs"><button id="open-trades-tab" class="active">Open trades <span id="open-count">0</span></button><button id="recent-trades-tab">Recorded orders</button></div><button id="all-history-button" class="text-button">Order journal <span>↗</span></button></div><div id="positions-content"></div></section>
+        </section>
+        <aside class="trade-ticket"><div class="section-heading"><h2>Place a trade</h2><span class="tiny-tag">Demo</span></div><div class="segmented trade-mode" id="trade-mode"><button data-mode="flash" class="active">ϟ Flash</button><button data-mode="standard">Standard</button></div><label class="field-label" for="duration">Duration <span data-icon="clock"></span></label><div class="ticket-field"><select id="duration" disabled aria-label="Trade duration"><option>Broker assigned</option></select></div><p id="duration-note" class="trade-feedback">Expiry is assigned by GuruTrade.</p><label class="field-label" for="amount">Trade amount <span id="amount-currency">INR</span></label><div class="ticket-field amount-field"><span id="amount-symbol">₹</span><input id="amount" type="number" min="1" max="100000" step="1" value="20" inputmode="decimal"><div><button id="amount-minus" aria-label="Decrease amount">−</button><button id="amount-plus" aria-label="Increase amount">+</button></div></div><div class="amount-presets" id="amount-presets"><button data-amount="20">₹20</button><button data-amount="100">₹100</button><button data-amount="500">₹500</button><button data-amount="1000">₹1000</button></div><div class="payout-box"><span>Potential profit <span class="info" title="Profit if the prediction wins. Your stake is also returned. A losing prediction loses the stake.">i</span></span><strong id="expected-profit">—</strong><div><span>Return on stake</span><span id="payout">—</span></div></div><p class="prediction-label">Where will the price go?</p><button id="trade-up" class="trade-button up"><span data-icon="trend-up"></span>Higher<span>↑</span></button><button id="trade-down" class="trade-button down"><span data-icon="trend-down"></span>Lower<span>↓</span></button><p id="trade-feedback" class="trade-feedback" role="status"></p><button id="review-order" class="button" hidden>I checked broker trades</button><div class="ticket-note"><span data-icon="shield"></span><p>GuruTrade demo<small>Demo orders use virtual funds.</small></p></div><div class="market-summary"><h3>Session overview</h3><div><span>Trades today</span><strong id="stat-trades">0</strong></div><div><span>Win rate</span><strong id="stat-winrate">—</strong></div><div><span>Net profit</span><strong id="stat-profit">$0.00</strong></div></div></aside>
+      </section>
+      <section id="secondary" class="page secondary-page hidden"></section>
+    </main>
+  </div>
+  <footer class="statusbar"><span><span class="status-dot"></span><span id="connection-state">Connecting</span></span><span id="footer-source">GuruTrade terminal · Broker data and account access</span><span id="footer-time">—</span></footer>
+  <dialog id="modal"><button id="modal-close" class="modal-close icon-button" aria-label="Close dialog">×</button><div id="modal-content"></div></dialog>
+  <div id="toast" class="toast hidden" role="status"></div>
+</body>
+</html>

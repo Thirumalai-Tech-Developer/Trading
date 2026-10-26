@@ -1,0 +1,9 @@
+data/
+node_modules/
+*.log
+bars.csv
+__pycache__/
+.cred
+analysis/*-evidence.json
+analysis/rea-*.json
+analysis/
