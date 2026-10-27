@@ -1,6 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { connectGuruStream } from './guru-stream.mjs';
@@ -150,7 +150,12 @@ export function aggregateGuruTicks(ticks, interval = 60, serverTime = Date.now()
   return [...buckets.values()].filter(bar => bar.time * 1000 >= first && (bar.time + interval) * 1000 <= serverTime);
 }
 
-export function createGuruBackend({ fetchImpl = globalThis.fetch, now = Date.now, timeoutMs = 12000, allowReal = process.env.GURU_ALLOW_REAL === '1', webSocketFactory = url => new WebSocket(url), orderDbPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'data', 'guru-orders.sqlite') } = {}) {
+const envNumber = name => process.env[name] === undefined || process.env[name] === '' ? null : Number(process.env[name]);
+const milliseconds = value => value === null || value === undefined ? null : value < 1e12 ? value * 1000 : value;
+
+export function createGuruBackend({ fetchImpl = globalThis.fetch, now = Date.now, timeoutMs = 12000, allowReal = process.env.GURU_ALLOW_REAL === '1', webSocketFactory = url => new WebSocket(url), orderDbPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'data', 'guru-orders.sqlite'),
+  settlementCsvPath = orderDbPath === ':memory:' ? null : path.join(path.dirname(orderDbPath), 'settlements.csv'),
+  risk = { maxStake: Number(process.env.GURU_MAX_REAL_STAKE || 20), balanceFloor: envNumber('GURU_BALANCE_FLOOR'), dailyLossCap: envNumber('GURU_DAILY_LOSS_CAP') } } = {}) {
   const deviceId = randomUUID();
   const cache = new Map(), pending = new Map(), controllers = new Set();
   let visitor = null, visitorPending = null, account = null, closed = false;
@@ -285,7 +290,7 @@ export function createGuruBackend({ fetchImpl = globalThis.fetch, now = Date.now
   }
   // --- continuous high-frequency tick collector (for AI data + candle history) ---
   // getNewlist returns an encoded {quotationList:[{ct:<ms>,cp}]} dense sub-second feed; queryDate polls only newer ticks.
-  const MAX_TICKS = 100000, COLLECT_MS = 1000, COLLECTOR_IDLE_MS = 120000;
+  const MAX_TICKS = 100000, COLLECT_MS = 1000, COLLECTOR_IDLE_MS = 120000, MAX_COLLECTORS = 40;
   const collectors = new Map();
   function decodeQuotationList(raw) {
     const decoded = typeof raw === 'string' ? decodeGuruQuotation(raw) : raw;
@@ -317,20 +322,21 @@ export function createGuruBackend({ fetchImpl = globalThis.fetch, now = Date.now
     const market = await instrument(symbol);
     let c = collectors.get(symbol);
     if (c) { c.lastAccess = now(); if (wait) await c.ready; return c; }
-    if (collectors.size >= 8) {
+    if (collectors.size >= MAX_COLLECTORS) {
       const oldest = [...collectors.values()].sort((a, b) => a.lastAccess - b.lastAccess)[0];
       stopCollector(oldest.symbol);
     }
     c = { symbol, productId: market.productId, ticks: new Map(), points: [], lastCt: 0, latestTick: null, listeners: new Set(), lastAccess: now(), timer: null, error: null, startedAt: now(), running: false };
     collectors.set(symbol, c);
     const add = t => { c.ticks.set(t.time, t.price); if (t.time >= c.lastCt) { c.lastCt = t.time; c.latestTick = t; } };
+    const addAll = ticks => { for (const t of ticks) add(t); storeTicks(symbol, ticks); };
     c.ready = (async () => {
     if (webSocketFactory) {
       try {
         const session = account ?? await ensureVisitor();
         c.stream = connectGuruStream({ session, deviceId, symbol, productId: c.productId, now, socketFactory: webSocketFactory, decode: decodeGuruQuotation, onError: message => { c.error = message; c.historyError = message; }, onTicks: (rows, metadata) => {
           const ticks = normalizeGuruTicks(rows);
-          for (const tick of ticks) add(tick);
+          addAll(ticks);
           lastHistoryAt = now();
           if (metadata.live) publishTicks(c, ticks, 'websocket');
           return ticks;
@@ -344,7 +350,7 @@ export function createGuruBackend({ fetchImpl = globalThis.fetch, now = Date.now
     // Minute samples are line history; they cannot reconstruct a candle's high and low.
     try { c.points = normalizeGuruPoints(await post('/ou/quotation/getlist', { symbol, productId: c.productId, interval: 60 }, true, { retryTransient: true })); }
     catch (error) { c.error = error.message; }
-    try { for (const t of await pollNewlist(c.productId, symbol)) add(t); c.error = null; lastHistoryAt = now(); }
+    try { addAll(await pollNewlist(c.productId, symbol)); c.error = null; lastHistoryAt = now(); }
     catch (error) { c.error = error.message; }
     }
     const step = async () => {
@@ -360,7 +366,7 @@ export function createGuruBackend({ fetchImpl = globalThis.fetch, now = Date.now
       try {
         const previous = c.lastCt;
         const ticks = await pollNewlist(c.productId, symbol, c.lastCt || undefined);
-        for (const tick of ticks) add(tick);
+        addAll(ticks);
         publishTicks(c, ticks.filter(tick => tick.time > previous), 'rest');
         if (c.ticks.size > MAX_TICKS) { const keys = [...c.ticks.keys()].sort((a, b) => a - b); for (let i = 0; i < keys.length - MAX_TICKS; i++) c.ticks.delete(keys[i]); }
         c.error = null; lastHistoryAt = now();
@@ -432,11 +438,85 @@ export function createGuruBackend({ fetchImpl = globalThis.fetch, now = Date.now
     if (!orderDb) {
       if (orderDbPath !== ':memory:') mkdirSync(path.dirname(orderDbPath), { recursive: true });
       orderDb = new DatabaseSync(orderDbPath);
-      orderDb.exec('PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, state TEXT NOT NULL, result TEXT)');
+      orderDb.exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;
+        CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, state TEXT NOT NULL, result TEXT);
+        CREATE TABLE IF NOT EXISTS ticks (symbol TEXT NOT NULL, time INTEGER NOT NULL, price REAL NOT NULL, PRIMARY KEY(symbol,time)) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS settlements (id TEXT PRIMARY KEY REFERENCES orders(id), real INTEGER NOT NULL, symbol TEXT NOT NULL, buy_sell INTEGER NOT NULL, amount REAL NOT NULL,
+          duration INTEGER, open_time INTEGER, open_price REAL, close_time INTEGER, close_price REAL, result TEXT NOT NULL, profit REAL, balance_after REAL, settled_at INTEGER NOT NULL);`);
+      try { orderDb.exec('ALTER TABLE orders ADD COLUMN created_at INTEGER'); } catch {} // pre-existing journals lack it
     }
     return orderDb;
   }
   const orderOwner = (session, real) => createHash('sha256').update(`${session.userId}:${real}`).digest('hex');
+  // shortcut: every broker tick is kept forever; add pruning once data/guru-orders.sqlite grows too large.
+  function storeTicks(symbol, ticks) {
+    if (closed || !ticks.length) return;
+    const db = openOrders(), insert = db.prepare('INSERT OR IGNORE INTO ticks VALUES(?,?,?)');
+    db.exec('BEGIN');
+    try { for (const t of ticks) insert.run(symbol, t.time, t.price); db.exec('COMMIT'); }
+    catch (error) { db.exec('ROLLBACK'); lastError = `Tick storage failed: ${error.message}`; }
+  }
+  function tickAt(symbol, time, side) {
+    return openOrders().prepare(side === 'after' ? 'SELECT time,price FROM ticks WHERE symbol=? AND time>=? ORDER BY time LIMIT 1' : 'SELECT time,price FROM ticks WHERE symbol=? AND time<=? ORDER BY time DESC LIMIT 1').get(symbol, time) ?? null;
+  }
+  // Completed candles from stored ticks; the forming bar is excluded.
+  function storedCandles({ symbol, from, to, interval = 60 }) {
+    if (!Number.isInteger(from) || !Number.isInteger(to) || from < 0 || to <= from || to - from > 31 * 86400000) throw new GuruBackendError('GURU_INVALID_QUERY', 'from/to must be millisecond timestamps at most 31 days apart', 400);
+    if (!Number.isInteger(interval) || interval < 1) throw new GuruBackendError('GURU_INVALID_QUERY', 'Invalid candle interval', 400);
+    const size = interval * 1000, end = Math.min(to, Math.floor(now() / size) * size);
+    return openOrders().prepare(`SELECT b*?4 AS time, (SELECT price FROM ticks WHERE symbol=?1 AND time=f) AS open, hi AS high, lo AS low, (SELECT price FROM ticks WHERE symbol=?1 AND time=l) AS close, n AS ticks
+      FROM (SELECT time/CAST(?5 AS INTEGER) AS b, MIN(time) f, MAX(time) l, MIN(price) lo, MAX(price) hi, COUNT(*) n FROM ticks WHERE symbol=?1 AND time>=?2 AND time<?3 GROUP BY b) ORDER BY b`)
+      .all(symbol, Math.floor(from / size) * size, end, interval, size).map(row => ({ ...row }));
+  }
+  const storedSymbols = () => openOrders().prepare('SELECT DISTINCT symbol FROM ticks').all().map(row => row.symbol);
+  // Worst case for today: settled real results plus every unsettled stake counted as lost.
+  function dailyLoss(owner, since) {
+    return openOrders().prepare("SELECT o.fingerprint, s.profit FROM orders o LEFT JOIN settlements s ON s.id=o.id WHERE o.created_at>=? AND o.state!='rejected' AND json_extract(o.fingerprint,'$[0]')=?").all(since, owner)
+      .reduce((loss, row) => loss + (row.profit === null ? Number(JSON.parse(row.fingerprint)[3]) : -row.profit), 0);
+  }
+  async function checkRisk(session, value) {
+    if (!(value <= risk.maxStake)) throw new GuruBackendError('GURU_RISK_STAKE', `Real orders above ₹${risk.maxStake} are blocked`, 403);
+    if (!Number.isFinite(risk.balanceFloor) || !Number.isFinite(risk.dailyLossCap)) throw new GuruBackendError('GURU_RISK_UNCONFIGURED', 'Set GURU_BALANCE_FLOOR and GURU_DAILY_LOSS_CAP before placing real orders', 403);
+    const { real: balance } = await getBalance();
+    if (balance - value < risk.balanceFloor) throw new GuruBackendError('GURU_RISK_FLOOR', `This order could take the balance below the ₹${risk.balanceFloor} floor`, 403);
+    const day = new Date(now()); day.setHours(0, 0, 0, 0);
+    if (dailyLoss(orderOwner(session, true), day.getTime()) + value > risk.dailyLossCap) throw new GuruBackendError('GURU_RISK_DAILY_CAP', `Today's loss could exceed the ₹${risk.dailyLossCap} cap`, 403);
+  }
+  let realQueue = Promise.resolve();
+  // Real orders pass the risk check one at a time, so two clicks cannot both fit under the same limit.
+  function realLock() { let release; const previous = realQueue; realQueue = new Promise(resolve => { release = resolve; }); return previous.then(() => release); }
+  const CSV_COLUMNS = ['settled_at', 'id', 'real', 'symbol', 'buy_sell', 'amount', 'duration', 'open_time', 'open_price', 'close_time', 'close_price', 'result', 'profit', 'balance_after'];
+  let settling = false;
+  // Result is derived from stored broker ticks at expiry (no verified broker settlement endpoint); balance_after is the broker's.
+  async function settleDue() {
+    if (!orderDb || closed || settling) return;
+    settling = true;
+    try {
+      const rows = orderDb.prepare("SELECT o.id, o.result FROM orders o LEFT JOIN settlements s ON s.id=o.id WHERE o.state='confirmed' AND s.id IS NULL AND o.created_at IS NOT NULL").all();
+      for (const row of rows) {
+        const r = JSON.parse(row.result), openTime = milliseconds(r.openPositionTimestamp) ?? r.quotationTime;
+        const closeTime = milliseconds(r.closeTime) ?? openTime + (r.duration ?? 60) * 1000;
+        if (now() < closeTime + 3000) continue;
+        const near = (time, side) => { const tick = tickAt(r.symbol, time, side); return tick && Math.abs(tick.time - time) <= 5000 ? tick.price : null; };
+        const openPrice = r.openPrice ?? near(openTime, 'before'), closePrice = near(closeTime, 'before');
+        if ((openPrice === null || closePrice === null) && now() < closeTime + 60000) continue;
+        const move = openPrice === null || closePrice === null ? null : Math.sign(closePrice - openPrice) * r.buySell;
+        const result = move === null ? 'unknown' : move > 0 ? 'won' : move < 0 ? 'lost' : 'draw';
+        const profit = result === 'won' ? (r.payout === null || r.payout === undefined ? null : Math.round(r.amount * r.payout) / 100) : result === 'lost' ? -r.amount : result === 'draw' ? 0 : null;
+        let balanceAfter = null;
+        try { const balance = await getBalance({ demo: !r.real }); balanceAfter = r.real ? balance.real : balance.demo; } catch {}
+        if (closed) return;
+        const record = { settled_at: now(), id: row.id, real: r.real ? 1 : 0, symbol: r.symbol, buy_sell: r.buySell, amount: r.amount, duration: r.duration ?? null, open_time: openTime, open_price: openPrice, close_time: closeTime, close_price: closePrice, result, profit, balance_after: balanceAfter };
+        if (!orderDb.prepare(`INSERT OR IGNORE INTO settlements(${CSV_COLUMNS}) VALUES(${CSV_COLUMNS.map(() => '?')})`).run(...CSV_COLUMNS.map(k => record[k])).changes) continue;
+        if (settlementCsvPath) {
+          const line = CSV_COLUMNS.map(k => record[k] ?? '').join(',') + '\n';
+          appendFileSync(settlementCsvPath, existsSync(settlementCsvPath) ? line : CSV_COLUMNS.join(',') + '\n' + line);
+        }
+      }
+    } finally { settling = false; }
+  }
+  const settleTimer = setInterval(() => { settleDue().catch(error => { lastError = `Settlement logging failed: ${error.message}`; }); }, 5000);
+  settleTimer.unref?.();
   async function getOrderHistory({ demo = false } = {}) {
     assertOpen();
     if (!demo) requireAccount();
@@ -493,6 +573,8 @@ export function createGuruBackend({ fetchImpl = globalThis.fetch, now = Date.now
       throw new GuruBackendError(failure.code, failure.message, failure.status);
     }
     const execution = (async () => {
+    const release = real ? await realLock() : null;
+    try {
     const market = await instrument(symbol);
     const selectedDuration = duration ?? (market.supportedDurations.includes(60) ? 60 : market.supportedDurations[0]);
     if (selectedDuration !== undefined && !market.supportedDurations.includes(selectedDuration)) throw new GuruBackendError('GURU_UNSUPPORTED_DURATION', 'This duration is not offered for this broker product. Choose an enabled duration.', 400);
@@ -500,6 +582,7 @@ export function createGuruBackend({ fetchImpl = globalThis.fetch, now = Date.now
     if (!market.tradable) throw new GuruBackendError('GURU_MARKET_CLOSED', 'This instrument is not currently tradable', 409);
     const minimum = real ? market.minimumAmount : market.demoMinimumAmount, maximum = real ? market.maximumAmount : market.demoMaximumAmount;
     if ((minimum !== null && value < minimum) || (maximum !== null && value > maximum)) throw new GuruBackendError('GURU_INVALID_TRADE', 'Trade amount is outside this instrument’s limits', 400);
+    if (real) await checkRisk(session, value);
     const quote = await getQuote({ symbol });
     if (quote.stale) throw new GuruBackendError('GURU_STALE_QUOTE', 'The broker quote is stale. Wait for a fresh quote.', 409);
     if (version !== sessionVersion || session !== (account ?? visitor)) throw new GuruBackendError('GURU_SESSION_CHANGED', 'Account changed before submission. Please retry.', 409);
@@ -508,8 +591,10 @@ export function createGuruBackend({ fetchImpl = globalThis.fetch, now = Date.now
     if (market.durationSource === 'tradeTimeRespList' && timeOption) { payload.timeUnit = timeOption.timeUnit; payload.timeUnitType = timeOption.timeUnitType; }
     const endpoint = real ? '/ou/trade/submit2/auth' : market.durationSource === 'tradeTimeRespList' ? '/ou/simulation/trade/submit3/auth' : '/ou/simulation/trade/submit2/auth';
     // Persist before sending: a lost response or restart must never cause an automatic resubmission.
-    const inserted = orderDb.prepare("INSERT OR IGNORE INTO orders VALUES(?,?,'pending',NULL)").run(key, fingerprint);
+    const inserted = orderDb.prepare("INSERT OR IGNORE INTO orders(id,fingerprint,state,result,created_at) VALUES(?,?,'pending',NULL,?)").run(key, fingerprint, now());
     if (!inserted.changes) throw new GuruBackendError('GURU_ORDER_UNKNOWN', 'This request is already recorded. Check broker trades before submitting again.', 409);
+    release?.();
+    ensureCollector(symbol, false).catch(() => {}); // settlement needs ticks at expiry
     try {
     const data = await post(endpoint, payload, true);
     if (!data?.positionId || !['string', 'number'].includes(typeof data.positionId)) throw new GuruBackendError('GURU_ORDER_UNKNOWN', 'Broker returned no order ID. Check broker trades before submitting another order.', 409);
@@ -517,7 +602,7 @@ export function createGuruBackend({ fetchImpl = globalThis.fetch, now = Date.now
       placed: true, requestId, real, symbol, buySell, amount: value, oneClick, duration: selectedDuration ?? null, quotationTime: payload.quotationTime,
       positionId: data?.positionId ?? null, openPrice: finite(data?.openPrice), openPositionTimestamp: finite(data?.openPositionTimestamp),
       closeTime: finite(data?.closeTime), settleTimestamp: finite(data?.settleTimestamp), grossProfit: finite(data?.grossProfit),
-      currency: typeof data?.currencyType === 'string' ? data.currencyType : null, serverTime: now(),
+      currency: typeof data?.currencyType === 'string' ? data.currencyType : null, payout: timeOption?.payout ?? market.payout, serverTime: now(),
     };
     orderDb.prepare("UPDATE orders SET state='confirmed',result=? WHERE id=?").run(JSON.stringify(result), key);
     return result;
@@ -528,6 +613,7 @@ export function createGuruBackend({ fetchImpl = globalThis.fetch, now = Date.now
       }
       throw new GuruBackendError('GURU_ORDER_UNKNOWN', 'Order confirmation was lost. Check broker trades before submitting a new order.', 409);
     }
+    } finally { release?.(); }
     })();
     orders.set(key, { fingerprint, promise: execution });
     try { return await execution; } finally {
@@ -539,10 +625,11 @@ export function createGuruBackend({ fetchImpl = globalThis.fetch, now = Date.now
     return { source: 'guru', mode: 'live', connected: !closed && lastCatalogAt !== null && now() - lastCatalogAt < 30000, closed, catalogCount, lastCatalogAt, lastQuoteAt, lastHistoryAt, lastError, anonymousVisitor: visitor !== null, loggedIn: account !== null, accountNumber: account?.accountNumber ?? null, ohlcAvailable: false, volumeAvailable: false, realOrdersEnabled: allowReal, orderExecution: account !== null && allowReal, demoOrderExecution: !closed, collectors: [...collectors.values()].map(c => ({ symbol: c.symbol, retained: c.ticks.size, lastCt: c.lastCt || null, error: c.error })) };
   }
   function close() {
-    closed = true; sessionVersion++; visitor = null; account = null; cache.clear();
+    closed = true; sessionVersion++; visitor = null; account = null; cache.clear(); clearInterval(settleTimer);
     for (const symbol of [...collectors.keys()]) stopCollector(symbol);
     for (const controller of controllers) controller.abort();
     if (!orders.size && orderDb) { orderDb.close(); orderDb = null; }
   }
-  return { getMarkets, getQuote, getCandles, getTicks, subscribeTicks, login, logout, getBalance, getActiveDeals, getOrderHistory, submitTrade, status, close };
+  const watch = async symbol => { await ensureCollector(symbol, false); };
+  return { getMarkets, getQuote, getCandles, getTicks, subscribeTicks, watch, storedCandles, storedSymbols, tickAt, settleDue, login, logout, getBalance, getActiveDeals, getOrderHistory, submitTrade, status, close };
 }

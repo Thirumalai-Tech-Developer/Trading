@@ -132,9 +132,10 @@ test('createGuruBackend: rejects upstream error status and surfaces it with a st
 
 test('createGuruBackend: login stores an account and trade sends the expected payload', async () => {
   const sent = [];
-  const guru = createGuruBackend({ allowReal: true, now: () => 1700000100000, fetchImpl: stubFetch({
+  const guru = createGuruBackend({ allowReal: true, orderDbPath: ':memory:', webSocketFactory: null, risk: { maxStake: 20, balanceFloor: 50, dailyLossCap: 100 }, now: () => 1700000100000, fetchImpl: stubFetch({
     '/ou/user/webLogin': () => ({ status: '0', data: { userId: 'ru', token: 'rt', accountNumber: 'trader@example.com' } }),
     '/ou/product/list/v3': OK(CATALOG),
+    '/ou/user/getBalance/auth': OK({ balance: '100', simulation: '1000' }),
     '/ou/quotation/current': OK({ fullPrice: '0.2342', fullTime: 1700000099000 }),
     '/ou/trade/submit2/auth': body => { sent.push(body); return { status: '0', data: { positionId: 'p1', openPrice: '0.2342', openPositionTimestamp: 1700000099000 } }; },
   }) });
@@ -159,7 +160,7 @@ test('createGuruBackend: login stores an account and trade sends the expected pa
 });
 
 test('createGuruBackend: trade rejects bad direction/amount; real trade needs login', async () => {
-  const guru = createGuruBackend({ now: () => 1700000100000, fetchImpl: stubFetch({
+  const guru = createGuruBackend({ orderDbPath: ':memory:', webSocketFactory: null, now: () => 1700000100000, fetchImpl: stubFetch({
     '/ou/user/webLogin': () => ({ status: '0', data: { userId: 'u', token: 't', accountNumber: 'a' } }),
     '/ou/product/list/v3': OK(CATALOG),
     '/ou/quotation/current': OK({ fullPrice: '0.2342', fullTime: 1700000099000 }),

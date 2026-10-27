@@ -33,6 +33,19 @@ node scripts/check-connection.mjs
 
 This checks login (if `.cred` is present), balances, catalogue, quotes, open positions and chart data. It submits no orders and prints no credentials. Automated tests mock order submission; they do not prove live execution or profitability.
 
+## Scanner, history, backtest, risk guard
+
+Broker ticks for every collected asset are stored in `data/guru-orders.sqlite` (table `ticks`). On start the server watches up to 30 tradable assets paying at least 82%, so history builds up while it runs. Backtests can only use ticks stored since then (plus about an hour of backfill per asset).
+
+- `GET /api/candles?asset=<symbol>&tf=1m|5m|15m[&from=<ms>&to=<ms>]`: completed candles from stored ticks. The default is the last 24 hours and the maximum range is 31 days. There is no volume.
+- `GET /api/signals`: setups on the newest closed bar. A setup needs RSI at an extreme, a Bollinger band pierce that closes back inside with a long rejection wick, and 15m and 30m trends (EMA of the closed bars) that agree. `warming` lists assets without enough stored history yet.
+- `GET /api/backtest?asset=<symbol>|all&days=7`: replays the same rules over stored ticks. Entry is the first tick after the signal bar; exit is the last tick at or before expiry. One trade per asset at a time. The response gives the win rate, the Wilson 95% lower bound, the break-even rate (`1/(1+payout)`, 54.9% at 82%) and net stakes. `edgeConfirmed` is true only when the lower bound beats break-even.
+- Rule overrides, accepted by both signals and backtest: `rsiLow, rsiHigh, rsiPeriod, bbPeriod, wick (0–1), trend=with|against|off, trendPeriod, duration (s), tf=60|300, payout`.
+
+**Real-order risk guard.** This runs in the server, so every caller is covered. It rejects a real order when: the stake is above `GURU_MAX_REAL_STAKE` (default ₹20); the broker balance minus the stake would fall below `GURU_BALANCE_FLOOR`; or today's worst-case loss would pass `GURU_DAILY_LOSS_CAP`. Worst-case loss counts settled losses net of wins, plus every unsettled stake as lost. If the floor or the cap is unset, real orders are refused. Demo orders are not limited.
+
+**Settlement log.** Every confirmed order is written to the `settlements` table and to `data/settlements.csv` about 3 s after expiry, with the broker balance after the trade. The won/lost result comes from stored ticks at expiry, not from a broker settlement record, so it can differ from the broker on near-ties.
+
 ## Separate AI candle endpoint
 
 `http://127.0.0.1:8765/v1/data` supplies completed one-minute underlying candles for AI testing.

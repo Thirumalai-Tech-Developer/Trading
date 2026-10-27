@@ -8,6 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createBarsReader, dataQuery, barsCSV } from './market-data.mjs';
 import { createGuruBackend } from './guru-backend.mjs';
+import { backtest, createScanner, parseRules, summarize } from './strategy.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const derive = promisify(scrypt);
@@ -15,6 +16,7 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const dollars = cents => cents / 100;
 const SESSION_MS = 7 * 86400000;
 const PAYOUT = 80;
+const TIMEFRAMES = { '1m': 60, '5m': 300, '15m': 900 };
 const MARKETS = [
   ['EURUSD', 'EUR/USD', 'Forex', 1.0864, 5],
   ['GBPUSD', 'GBP/USD', 'Forex', 1.2941, 5],
@@ -83,6 +85,7 @@ async function checkPassword(value, stored) {
 export function createApp({ dbPath = path.join(ROOT, 'data', 'trading.sqlite'), barsPath = process.env.BARS_CSV || path.join(ROOT, 'bars.csv'), now = Date.now, guruOptions = {} } = {}) {
   const readBars = createBarsReader(barsPath);
   const guru = createGuruBackend({ now, ...(dbPath === ':memory:' ? { orderDbPath: ':memory:', webSocketFactory: null } : {}), ...guruOptions });
+  const scanner = createScanner({ guru, now });
   if (dbPath !== ':memory:') mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new DatabaseSync(dbPath);
   db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
@@ -286,7 +289,7 @@ export function createApp({ dbPath = path.join(ROOT, 'data', 'trading.sqlite'), 
       const mutation = ['POST', 'PATCH', 'PUT', 'DELETE'].includes(request.method);
       const body = mutation ? await readBody(request) : {};
       const user = authenticate(request);
-      const publicRoute = ['GET /api/session', 'GET /api/markets', 'GET /api/candles', 'GET /api/guru/markets', 'GET /api/guru/candles', 'GET /api/guru/quote', 'GET /api/guru/ticks', 'GET /api/guru/status', 'GET /api/guru/balance', 'GET /api/guru/deals', 'POST /api/guru/login', 'POST /api/guru/logout', 'POST /api/guru/trade', 'POST /api/auth/register', 'POST /api/auth/login', 'POST /api/auth/recover'].includes(route);
+      const publicRoute = ['GET /api/session', 'GET /api/markets', 'GET /api/candles', 'GET /api/signals', 'GET /api/backtest', 'GET /api/guru/markets', 'GET /api/guru/candles', 'GET /api/guru/quote', 'GET /api/guru/ticks', 'GET /api/guru/status', 'GET /api/guru/balance', 'GET /api/guru/deals', 'POST /api/guru/login', 'POST /api/guru/logout', 'POST /api/guru/trade', 'POST /api/auth/register', 'POST /api/auth/login', 'POST /api/auth/recover'].includes(route);
       if (!publicRoute && route !== 'GET /api/guru/orders' && !user) throw new HttpError(401, 'Sign in to continue');
       if (mutation && user && !url.pathname.startsWith('/api/guru/') && !['POST /api/auth/register', 'POST /api/auth/login', 'POST /api/auth/recover'].includes(route) && request.headers['x-csrf-token'] !== user.csrf) throw new HttpError(403, 'Invalid session verification token; refresh and retry');
       settle();
@@ -295,6 +298,28 @@ export function createApp({ dbPath = path.join(ROOT, 'data', 'trading.sqlite'), 
         const price = priceAt(symbol, now());
         return { symbol, name, category, precision, price, change: Number(((price / priceAt(symbol, now() - 86400000) - 1) * 100).toFixed(3)), payout: PAYOUT };
       }) });
+      const query = Object.fromEntries(url.searchParams);
+      if (route === 'GET /api/candles' && url.searchParams.has('asset')) {
+        const interval = TIMEFRAMES[query.tf || '1m'];
+        if (!interval) throw new HttpError(400, 'tf must be 1m, 5m or 15m');
+        const to = query.to ? Number(query.to) : now(), from = query.from ? Number(query.from) : to - 86400000;
+        await guru.watch(query.asset); // validates the symbol and keeps history accumulating
+        return send({ asset: query.asset, tf: query.tf || '1m', candles: guru.storedCandles({ symbol: query.asset, from, to, interval }), source: 'stored_broker_ticks', volumeAvailable: false, serverTime: now() });
+      }
+      if (route === 'GET /api/signals') { scanner.start(); return send(await scanner.scan(parseRules(query))); }
+      if (route === 'GET /api/backtest') {
+        const rules = parseRules(query), days = Number(query.days || 7);
+        if (!(days > 0 && days <= 30)) throw new HttpError(400, 'days must be between 0 and 30');
+        if (!query.asset) throw new HttpError(400, 'asset is required (a symbol or "all")');
+        const to = now(), from = Math.round(to - days * 86400000);
+        const assets = (query.asset === 'all' ? guru.storedSymbols() : [query.asset]).map(symbol => {
+          const prices = { after: time => guru.tickAt(symbol, time, 'after'), before: time => guru.tickAt(symbol, time, 'before') };
+          const candles = guru.storedCandles({ symbol, from, to, interval: rules.tf });
+          return { symbol, candles: candles.length, firstBar: candles[0]?.time ?? null, ...backtest(candles, prices, rules) };
+        });
+        const { list, ...total } = summarize(assets.flatMap(a => a.list), rules.payout);
+        return send({ rules, days, total, assets: assets.map(({ list, ...a }) => a), note: 'Uses only ticks this server has stored; results are ex-ante rules on past data, not a forecast.', serverTime: now() });
+      }
       if (route === 'GET /api/candles') {
         const symbol = url.searchParams.get('symbol') || 'EURUSD';
         const interval = Number(url.searchParams.get('interval') || 5);
@@ -448,12 +473,13 @@ export function createApp({ dbPath = path.join(ROOT, 'data', 'trading.sqlite'), 
   timer.unref();
   async function close() {
     clearInterval(timer);
+    scanner.stop();
     for (const end of feeds) end();
     guru.close();
     if (server.listening) await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     db.close();
   }
-  return { server, close, guru };
+  return { server, close, guru, scanner };
 }
 
 // Optional local credentials; interactive sign-in also supports expired sessions.
@@ -477,6 +503,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   app.server.listen(port, host, () => {
     console.log(`Trading data API: http://${host}:${port}/v1/data\nCandle source: ${process.env.BARS_CSV || path.join(ROOT, 'bars.csv')}\n/v1/data uses source OHLCV only. Separate /api/* practice routes use simulations.`);
     autoLoginFromCred(app.guru);
+    app.scanner.start();
   });
   app.server.on('error', error => { console.error(error.message); app.close().finally(() => process.exit(1)); });
   for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => app.close().then(() => process.exit(0)));

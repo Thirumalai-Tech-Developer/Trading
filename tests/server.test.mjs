@@ -209,3 +209,16 @@ test('expired trades settle on restart and account/ledger survive process lifeti
   assert.ok(candles.every(c => c.high >= c.open && c.high >= c.close && c.low <= c.open && c.low <= c.close));
   assert.equal(candles.at(-1).close, priceAt('BTCUSD', clock));
 });
+
+test('history, signal and backtest routes validate input without a broker call', async t => {
+  const app = await launch(); t.after(() => app.close());
+  const client = app.client();
+  assert.equal((await client.request('/api/candles?asset=fx_test&tf=2m')).status, 400);
+  assert.equal((await client.request('/api/backtest?asset=all&rsiLow=90')).status, 400);
+  assert.equal((await client.request('/api/backtest?asset=all&days=90')).status, 400);
+  assert.equal((await client.request('/api/backtest')).status, 400);
+  const empty = await client.request('/api/backtest?asset=all&days=1&trend=off');
+  assert.equal(empty.status, 200);
+  assert.equal(empty.data.total.trades, 0);
+  assert.equal(empty.data.rules.trend, 'off');
+});

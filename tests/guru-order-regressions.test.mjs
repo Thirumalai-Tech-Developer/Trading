@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createGuruBackend, brokerDuration } from '../guru-backend.mjs';
@@ -142,4 +142,50 @@ test('minute samples remain line history and every advertised chart interval is 
   }
   await assert.rejects(guru.getTicks({ symbol: 'fx_test', since: -1 }), { code: 'GURU_INVALID_QUERY' });
   await assert.rejects(guru.getTicks({ symbol: 'fx_test', limit: 0 }), { code: 'GURU_INVALID_QUERY' });
+});
+
+test('server-side risk guard blocks oversized, floor-breaking and over-cap real orders', async t => {
+  const limits = { maxStake: 20, balanceFloor: 70, dailyLossCap: 30 };
+  const { guru, calls } = fixture({}, { allowReal: true, risk: limits }); t.after(() => guru.close());
+  await guru.login({ accountNumber: 'account@test.invalid', passWord: 'password' });
+  await assert.rejects(guru.submitTrade({ ...ORDER, amount: '21', real: true, requestId: 'risk-stake' }), { code: 'GURU_RISK_STAKE' });
+  await guru.submitTrade({ ...ORDER, real: true, requestId: 'risk-first' });
+  // The first ₹20 is still unsettled, so it counts as lost: 20 + 15 > 30.
+  await assert.rejects(guru.submitTrade({ ...ORDER, amount: '15', real: true, requestId: 'risk-cap' }), { code: 'GURU_RISK_DAILY_CAP' });
+  assert.equal(submissions(calls).length, 1);
+  const floor = fixture({}, { allowReal: true, risk: { ...limits, balanceFloor: 85 } }); t.after(() => floor.guru.close());
+  await floor.guru.login({ accountNumber: 'account@test.invalid', passWord: 'password' });
+  await assert.rejects(floor.guru.submitTrade({ ...ORDER, real: true }), { code: 'GURU_RISK_FLOOR' });
+  const unset = fixture({}, { allowReal: true, risk: { maxStake: 20, balanceFloor: null, dailyLossCap: null } }); t.after(() => unset.guru.close());
+  await unset.guru.login({ accountNumber: 'account@test.invalid', passWord: 'password' });
+  await assert.rejects(unset.guru.submitTrade({ ...ORDER, real: true }), { code: 'GURU_RISK_UNCONFIGURED' });
+  assert.equal(submissions(floor.calls).length + submissions(unset.calls).length, 0);
+  // Demo orders are not limited.
+  await guru.submitTrade({ ...ORDER, amount: '50', requestId: 'demo-large' });
+});
+
+test('stored ticks serve candles and settle orders into the CSV log with the balance after', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'guru-settle-')); t.after(() => rm(directory, { recursive: true, force: true }));
+  const csv = path.join(directory, 'settlements.csv');
+  let clock = NOW;
+  const ticks = [[-125000, '1.2'], [-100000, '1.22'], [-70000, '1.21'], [59500, '1.3']].map(([offset, cp]) => ({ ct: NOW + offset, cp }));
+  const { guru } = fixture({
+    '/ou/quotation/getlist': [], '/ou/quotation/getNewlist': { quotationList: ticks },
+    '/ou/simulation/trade/submit2/auth': { positionId: 'demo-position', openPrice: '1.25', openPositionTimestamp: NOW },
+  }, { now: () => clock, settlementCsvPath: csv }); t.after(() => guru.close());
+  await guru.submitTrade(ORDER);
+  await guru.getTicks({ symbol: 'fx_test' });
+  const candles = guru.storedCandles({ symbol: 'fx_test', from: NOW - 200000, to: NOW, interval: 60 });
+  assert.equal(candles.reduce((n, c) => n + c.ticks, 0), 3);
+  assert.ok(candles.every(c => Number.isInteger(c.time / 60) && c.open > 0 && c.close > 0 && c.high >= c.low));
+  assert.deepEqual(guru.storedSymbols(), ['fx_test']);
+  await guru.settleDue();
+  await assert.rejects(readFile(csv)); // not expired yet
+  clock = NOW + 65000;
+  await guru.settleDue(); await guru.settleDue();
+  const [header, row, extra] = (await readFile(csv, 'utf8')).trim().split('\n');
+  assert.equal(extra, undefined); // logged once
+  const record = Object.fromEntries(header.split(',').map((key, i) => [key, row.split(',')[i]]));
+  assert.equal(record.result, 'won'); assert.equal(record.profit, '16'); assert.equal(record.balance_after, '1000');
+  assert.equal(record.open_price, '1.25'); assert.equal(record.close_price, '1.3');
 });
